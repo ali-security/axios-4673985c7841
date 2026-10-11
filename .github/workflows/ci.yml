@@ -1,10 +1,12 @@
 name: 'CI'
 
 on:
-  push:
-    branches: '**'
-  pull_request:
-    branches: '**'
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional mocha spec glob(s) to run instead of the full suite'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -12,8 +14,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
 
     strategy:
+      fail-fast: false
       matrix:
         node-version: [12.x, 14.x, 16.x, 18.x]
 
@@ -27,4 +31,33 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
-      - run: npm test
+      - name: Build dist bundles from patched lib/
+        run: npm run build
+      - run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            node bin/ssl_hotfix.js mocha ${{ inputs.test-filter }} --timeout 30000 --exit
+          else
+            npm test
+          fi
+
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          persist-credentials: false
+      - name: Setup node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16.20.0
+          cache: npm
+      - run: npm ci
+      - name: Build dist bundles from patched lib/
+        run: npm run build
+      - run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: axios-tgz
+          path: axios-1.3.6.tgz
+          if-no-files-found: error
