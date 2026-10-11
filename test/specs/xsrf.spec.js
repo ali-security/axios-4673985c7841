@@ -224,6 +224,21 @@ describe('xsrf', function () {
           done();
         });
       });
+
+      // GHSA-q8qp-cvcw-x6jj
+      it('should not set xsrf header for cross origin when Object.prototype.withXSRFToken is polluted with true', function (done) {
+        Object.prototype.withXSRFToken = true;
+        document.cookie = axios.defaults.xsrfCookieName + '=12345';
+
+        axios('http://example.com/', {
+          withCredentials: true
+        });
+
+        getAjaxRequest().then(function (request) {
+          expect(request.requestHeaders[axios.defaults.xsrfHeaderName]).toEqual(undefined);
+          done();
+        });
+      });
     });
   });
 });

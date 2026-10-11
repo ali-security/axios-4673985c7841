@@ -116,6 +116,29 @@ describe('basicAuth', function () {
     }, 100);
   });
 
+  // GHSA-q8qp-cvcw-x6jj
+  it('should ignore Object.prototype.auth and Object.prototype.baseURL gadgets', function (done) {
+    function cleanup() {
+      delete Object.prototype.auth;
+      delete Object.prototype.baseURL;
+    }
+
+    Object.prototype.auth = {username: 'attacker', password: 'exfil'};
+    Object.prototype.baseURL = 'https://evil.com';
+
+    axios('/api/users');
+
+    getAjaxRequest().then(function (request) {
+      cleanup();
+      expect(request.url).toEqual('/api/users');
+      expect(request.requestHeaders['Authorization']).toEqual(undefined);
+      done();
+    }, function (err) {
+      cleanup();
+      done.fail(err);
+    });
+  });
+
   it('should fail to encode HTTP Basic auth credentials with non-Latin1 characters in username', function (done) {
     axios('/foo', {
       auth: {
