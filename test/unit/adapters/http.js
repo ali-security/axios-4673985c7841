@@ -154,6 +154,152 @@ describe('supports http with nodejs', function () {
     delete process.env.no_proxy;
   });
 
+  it('should sanitize request headers containing CRLF characters', async () => {
+    const server = await startHTTPServer({
+      handler: (req, res) => {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(
+          JSON.stringify({
+            xTest: req.headers['x-test'],
+            injected: req.headers.injected === undefined ? null : req.headers.injected
+          })
+        );
+      },
+      port: 4444
+    });
+
+    try {
+      const {data} = await axios.get(`http://localhost:${server.address().port}/`, {
+        headers: {
+          'x-test': '\tok\r\nInjected: yes '
+        }
+      });
+
+      assert.strictEqual(data.xTest, 'okInjected: yes');
+      assert.strictEqual(data.injected, null);
+    } finally {
+      await stopHTTPServer(server);
+    }
+  });
+
+  it('should not allow a header value to smuggle an extra request', async () => {
+    const requests = [];
+    const server = await startHTTPServer({
+      handler: (req, res) => {
+        requests.push({method: req.method, url: req.url, rawHeaders: req.rawHeaders.slice()});
+        res.end('ok');
+      },
+      port: 4444
+    });
+
+    try {
+      const {data} = await axios.get(`http://localhost:${server.address().port}/pings`, {
+        headers: {
+          'x-amz-target': 'dummy\r\n\r\nPUT /latest/api/token HTTP/1.1\r\nHost: 169.254.169.254\r\n' +
+            'X-aws-ec2-metadata-token-ttl-seconds: 21600\r\n\r\nGET /ignore'
+        }
+      });
+
+      await setTimeoutAsync(100);
+
+      assert.strictEqual(data, 'ok');
+      assert.strictEqual(requests.length, 1, 'only the original request must reach the server');
+      assert.strictEqual(requests[0].method, 'GET');
+      assert.strictEqual(requests[0].url, '/pings');
+
+      const rawHeaders = requests[0].rawHeaders;
+      const amzTargetIndex = rawHeaders.findIndex((name, i) => i % 2 === 0 && name.toLowerCase() === 'x-amz-target');
+
+      assert.notStrictEqual(amzTargetIndex, -1);
+      assert.strictEqual(
+        rawHeaders[amzTargetIndex + 1],
+        'dummyPUT /latest/api/token HTTP/1.1Host: 169.254.169.254X-aws-ec2-metadata-token-ttl-seconds: 21600GET /ignore'
+      );
+      assert.ok(
+        !rawHeaders.some((name, i) => i % 2 === 0 && name.toLowerCase() === 'x-aws-ec2-metadata-token-ttl-seconds'),
+        'no injected header line must reach the server'
+      );
+    } finally {
+      await stopHTTPServer(server);
+    }
+  });
+
+  it('should not allow a polluted prototype header to smuggle an extra request', async () => {
+    const requests = [];
+    const server = await startHTTPServer({
+      handler: (req, res) => {
+        requests.push({method: req.method, url: req.url, rawHeaders: req.rawHeaders.slice()});
+        res.end('ok');
+      },
+      port: 4444
+    });
+
+    Object.prototype['x-amz-target'] = 'dummy\r\n\r\nPUT /latest/api/token HTTP/1.1\r\nHost: 169.254.169.254\r\n' +
+      'X-aws-ec2-metadata-token-ttl-seconds: 21600\r\n\r\nGET /ignore';
+
+    try {
+      const {data} = await axios.get(`http://localhost:${server.address().port}/pings`);
+
+      await setTimeoutAsync(100);
+
+      assert.strictEqual(data, 'ok');
+      assert.strictEqual(requests.length, 1, 'only the original request must reach the server');
+      assert.strictEqual(requests[0].method, 'GET');
+      assert.strictEqual(requests[0].url, '/pings');
+      assert.ok(
+        requests[0].rawHeaders.every((value) => !/[\r\n]/.test(value)),
+        'no header line may carry CR/LF'
+      );
+      assert.ok(
+        !requests[0].rawHeaders.some((name, i) => i % 2 === 0 && name.toLowerCase() === 'x-aws-ec2-metadata-token-ttl-seconds'),
+        'no injected header line must reach the server'
+      );
+    } finally {
+      delete Object.prototype['x-amz-target'];
+      await stopHTTPServer(server);
+    }
+  });
+
+  [
+    {target: 'http://127.0.0.1:1/', description: '127.0.0.1'},
+    {target: 'http://[::1]:1/', description: '[::1]'}
+  ].forEach(({target, description}) => {
+    it(`should not use proxy for ${description} when no_proxy is localhost`, async () => {
+      const envKeys = ['http_proxy', 'HTTP_PROXY', 'no_proxy', 'NO_PROXY'];
+      const originalEnv = envKeys.map((key) => process.env[key]);
+
+      let proxyRequests = 0;
+      const proxy = await startHTTPServer({
+        handler: (_, response) => {
+          proxyRequests += 1;
+          response.end('proxied');
+        },
+        port: 4000
+      });
+
+      const proxyUrl = `http://localhost:${proxy.address().port}/`;
+      process.env.http_proxy = proxyUrl;
+      process.env.HTTP_PROXY = proxyUrl;
+      process.env.no_proxy = 'localhost';
+      process.env.NO_PROXY = 'localhost';
+
+      try {
+        await assert.rejects(axios.get(target, {timeout: 100}));
+        assert.equal(proxyRequests, 0, `should not use proxy for loopback alias ${description}`);
+      } finally {
+        await stopHTTPServer(proxy);
+
+        envKeys.forEach((key, i) => {
+          if (originalEnv[i] === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = originalEnv[i];
+          }
+        });
+      }
+    });
+  });
+
   it('should throw an error if the timeout property is not parsable as a number', function (done) {
 
     server = http.createServer(function (req, res) {

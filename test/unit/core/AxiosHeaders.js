@@ -74,6 +74,43 @@ describe('AxiosHeaders', function () {
 
       assert.strictEqual(headers.get('foo'), 'value2');
     })
+
+    it('should sanitize invalid characters in header value', () => {
+      const headers = new AxiosHeaders();
+
+      headers.set('x-test', '\t safe\r\nInjected: true \u0000');
+
+      assert.strictEqual(headers.get('x-test'), 'safeInjected: true');
+    });
+
+    it('should sanitize invalid characters in any array header value', () => {
+      const headers = new AxiosHeaders();
+
+      headers.set('set-cookie', ['safe=1', ' \tunsafe=1\nInjected: true\r\n ']);
+
+      assert.deepStrictEqual(headers.get('set-cookie'), ['safe=1', 'unsafe=1Injected: true']);
+    });
+
+    it('should sanitize header values passed as an object and on normalize', () => {
+      const headers = new AxiosHeaders({
+        'x-amz-target': 'dummy\r\n\r\nPUT /latest/api/token HTTP/1.1\r\nHost: 169.254.169.254\r\n\r\n'
+      });
+
+      assert.strictEqual(
+        headers.get('x-amz-target'),
+        'dummyPUT /latest/api/token HTTP/1.1Host: 169.254.169.254'
+      );
+
+      // values assigned directly (bypassing set) are sanitized when the adapters normalize headers
+      headers['x-direct'] = 'ok\r\nInjected: yes';
+
+      headers.normalize();
+
+      assert.strictEqual(headers.get('x-direct'), 'okInjected: yes');
+      Object.values(headers.toJSON()).forEach((value) => {
+        assert.ok(!/[\r\n]/.test(value), 'header value must not contain CR/LF');
+      });
+    });
   });
 
   describe('get', function () {

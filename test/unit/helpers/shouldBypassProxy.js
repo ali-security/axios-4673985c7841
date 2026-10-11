@@ -42,6 +42,39 @@ describe('helpers::shouldBypassProxy', () => {
     assert.strictEqual(shouldBypassProxy('http://[::1]:8080/'), true);
   });
 
+  it('should bypass proxy for 127.0.0.1 when no_proxy contains localhost', () => {
+    setNoProxy('localhost');
+
+    assert.strictEqual(shouldBypassProxy('http://127.0.0.1:7777/'), true);
+  });
+
+  it('should bypass proxy for [::1] when no_proxy contains localhost', () => {
+    setNoProxy('localhost');
+
+    assert.strictEqual(shouldBypassProxy('http://[::1]:7777/'), true);
+  });
+
+  it('should bypass proxy for localhost when no_proxy contains 127.0.0.1', () => {
+    setNoProxy('127.0.0.1');
+
+    assert.strictEqual(shouldBypassProxy('http://localhost:7777/'), true);
+  });
+
+  it('should bypass proxy for localhost when no_proxy contains ::1', () => {
+    setNoProxy('::1');
+
+    assert.strictEqual(shouldBypassProxy('http://localhost:7777/'), true);
+  });
+
+  it('should keep loopback alias matching port-aware', () => {
+    setNoProxy('localhost:8080');
+
+    assert.strictEqual(shouldBypassProxy('http://127.0.0.1:8080/'), true);
+    assert.strictEqual(shouldBypassProxy('http://[::1]:8080/'), true);
+    assert.strictEqual(shouldBypassProxy('http://127.0.0.1:8081/'), false);
+    assert.strictEqual(shouldBypassProxy('http://example.com:8080/'), false);
+  });
+
   it('should match wildcard and explicit ports', () => {
     setNoProxy('*.example.com,localhost:8080');
 
