@@ -344,6 +344,7 @@ export interface AxiosRequestConfig<D = any> {
     FormData?: new (...args: any[]) => object;
   };
   formSerializer?: FormSerializerOptions;
+  withXSRFToken?: boolean | ((config: InternalAxiosRequestConfig) => boolean | undefined);
 }
 
 // Alias
