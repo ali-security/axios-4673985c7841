@@ -61,6 +61,61 @@ describe('basicAuth', function () {
     }, 100);
   });
 
+  it('should ignore inherited nested auth fields', function (done) {
+    Object.defineProperty(Object.prototype, 'username', {
+      value: 'inherited-user',
+      writable: true,
+      configurable: true
+    });
+    Object.defineProperty(Object.prototype, 'password', {
+      value: 'inherited-pass',
+      writable: true,
+      configurable: true
+    });
+
+    try {
+      axios('/foo', {
+        auth: {}
+      });
+    } finally {
+      delete Object.prototype.username;
+      delete Object.prototype.password;
+    }
+
+    setTimeout(function () {
+      const request = jasmine.Ajax.requests.mostRecent();
+
+      expect(request.requestHeaders['Authorization']).toEqual('Basic Og==');
+      done();
+    }, 100);
+  });
+
+  it('should ignore inherited nested paramsSerializer fields', function (done) {
+    Object.defineProperty(Object.prototype, 'serialize', {
+      value: function () {
+        return 'inherited=1';
+      },
+      writable: true,
+      configurable: true
+    });
+
+    try {
+      axios('/foo', {
+        params: {value: 'a b'},
+        paramsSerializer: {}
+      });
+    } finally {
+      delete Object.prototype.serialize;
+    }
+
+    setTimeout(function () {
+      const request = jasmine.Ajax.requests.mostRecent();
+
+      expect(request.url).toEqual('/foo?value=a+b');
+      done();
+    }, 100);
+  });
+
   it('should fail to encode HTTP Basic auth credentials with non-Latin1 characters in username', function (done) {
     axios('/foo', {
       auth: {
