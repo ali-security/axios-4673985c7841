@@ -1847,6 +1847,21 @@ describe('supports http with nodejs', function () {
         });
       }).catch(done);
     });
+
+    it('should enforce maxContentLength for data URLs (CVE-2025-58754)', function (done) {
+      // Create a large data URL that exceeds maxContentLength
+      const largeData = 'A'.repeat(10000);
+      const buffer = Buffer.from(largeData, 'utf-8');
+      const dataURI = 'data:application/octet-stream;base64,' + buffer.toString('base64');
+
+      axios.get(dataURI, {maxContentLength: 1000}).then(() => {
+        done(new Error('Expected request to fail with maxContentLength exceeded'));
+      }).catch((error) => {
+        assert.strictEqual(error.code, 'ERR_BAD_RESPONSE');
+        assert.ok(error.message.includes('maxContentLength size of 1000 exceeded'));
+        done();
+      });
+    });
   });
 
   describe('progress', function () {
