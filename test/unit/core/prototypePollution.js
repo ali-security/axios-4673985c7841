@@ -9,12 +9,19 @@ import mergeConfig from "../../../lib/core/mergeConfig.js";
 import AxiosHeaders from "../../../lib/core/AxiosHeaders.js";
 import buildURL from "../../../lib/helpers/buildURL.js";
 import httpAdapter from "../../../lib/adapters/http.js";
+import defaults from "../../../lib/defaults/index.js";
 import axios from "../../../index.js";
 
 describe("Prototype Pollution Protection", function () {
   afterEach(function () {
     // Clean up any pollution that might have occurred
     delete Object.prototype.polluted;
+    delete Object.prototype.transport;
+    delete Object.prototype.transformRequest;
+    delete Object.prototype.transformResponse;
+    delete Object.prototype.formSerializer;
+    delete Object.prototype.env;
+    delete Object.prototype.parseReviver;
   });
 
   describe("utils.merge", function () {
@@ -195,6 +202,43 @@ describe("Prototype Pollution Protection", function () {
       assert.strictEqual(Object.prototype.polluted, undefined);
       assert.strictEqual(result.customProp.safe, "value");
       assert.strictEqual(result.customProp.hasOwnProperty("__proto__"), false);
+    });
+
+    it("should not inherit transport from Object.prototype", function () {
+      Object.prototype.transport = { request: function () {} };
+      const result = mergeConfig({}, { url: "/a" });
+      assert.strictEqual(result.hasOwnProperty("transport"), false);
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(result, "transport"),
+        false
+      );
+    });
+
+    it("should not inherit transformRequest from Object.prototype", function () {
+      Object.prototype.transformRequest = function () { return "hijacked"; };
+      const result = mergeConfig({}, { url: "/a" });
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(result, "transformRequest"),
+        false
+      );
+    });
+
+    it("should not inherit transformResponse from Object.prototype", function () {
+      Object.prototype.transformResponse = function () { return "hijacked"; };
+      const result = mergeConfig({}, { url: "/a" });
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(result, "transformResponse"),
+        false
+      );
+    });
+
+    it("should not inherit arbitrary keys from Object.prototype", function () {
+      Object.prototype.polluted = "yes";
+      const result = mergeConfig({}, { url: "/a" });
+      assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(result, "polluted"),
+        false
+      );
     });
 
     it("should still merge configs correctly", function () {
@@ -811,6 +855,377 @@ describe("GHSA-7q8q-rj6j-mhjq nested option and Symbol gadgets", function () {
         assert.strictEqual(capturedHeaders["X-Injected"] || capturedHeaders["x-injected"], undefined);
         assert.strictEqual(response.headers.get("x-server"), "real");
         assert.strictEqual(response.headers.get("x-injected"), undefined);
+      } finally {
+        cleanup();
+      }
+    });
+  });
+});
+
+describe("GHSA-pf86-5x62-jrwf config value gadgets", function () {
+  const pollutedKeys = [
+    "transport",
+    "transformRequest",
+    "transformResponse",
+    "adapter",
+    "headers",
+    "formSerializer",
+    "env",
+    "transitional",
+    "responseType",
+    "response",
+  ];
+
+  // Inject a value onto Object.prototype the way a separate prototype-pollution
+  // bug would. `writable: true` keeps ordinary assignments on plain objects
+  // working while the pollution is active.
+  function pollute(key, value) {
+    Object.defineProperty(Object.prototype, key, {
+      value: value,
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  function cleanup() {
+    pollutedKeys.forEach(function (key) {
+      delete Object.prototype[key];
+    });
+  }
+
+  function startServer(handler) {
+    return new Promise(function (resolve, reject) {
+      const server = http.createServer(handler);
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", function () {
+        resolve(server);
+      });
+    });
+  }
+
+  function stopServer(server) {
+    return new Promise(function (resolve) {
+      if (!server) {
+        return resolve();
+      }
+      server.close(function () {
+        resolve();
+      });
+    });
+  }
+
+  afterEach(cleanup);
+
+  describe("mergeConfig with defaults", function () {
+    it("should not let polluted transformRequest/transformResponse replace the defaults", function () {
+      const hijack = function () {
+        return "hijacked";
+      };
+
+      pollute("transformRequest", hijack);
+      pollute("transformResponse", hijack);
+
+      try {
+        const result = mergeConfig(defaults, { url: "/a" });
+
+        assert.notStrictEqual(result.transformRequest, hijack);
+        assert.notStrictEqual(result.transformResponse, hijack);
+        assert.deepStrictEqual(result.transformRequest, defaults.transformRequest);
+        assert.deepStrictEqual(result.transformResponse, defaults.transformResponse);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("should not let a polluted adapter replace the default adapter", function () {
+      const hijack = function () {
+        return Promise.resolve({ data: "hijacked" });
+      };
+
+      pollute("adapter", hijack);
+
+      try {
+        const result = mergeConfig(defaults, { url: "/a" });
+
+        assert.notStrictEqual(result.adapter, hijack);
+        assert.deepStrictEqual(result.adapter, defaults.adapter);
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("should not merge polluted headers into the default headers", function () {
+      pollute("headers", { "X-Injected": "yes" });
+
+      try {
+        const result = mergeConfig(defaults, { url: "/a" });
+
+        assert.strictEqual(
+          Object.prototype.hasOwnProperty.call(result.headers, "X-Injected"),
+          false
+        );
+        assert.strictEqual(
+          result.headers.common.Accept,
+          defaults.headers.common.Accept
+        );
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("should still prefer own request config values over defaults", function () {
+      const ownTransform = function (data) {
+        return data;
+      };
+      const result = mergeConfig(defaults, {
+        url: "/a",
+        transformRequest: ownTransform,
+        headers: { "X-Own": "yes" },
+      });
+
+      assert.strictEqual(result.transformRequest, ownTransform);
+      assert.strictEqual(result.headers["X-Own"], "yes");
+      assert.deepStrictEqual(result.transformResponse, defaults.transformResponse);
+    });
+  });
+
+  describe("defaults.transformRequest", function () {
+    it("should ignore a polluted formSerializer for urlencoded payloads", function () {
+      let visitorInvoked = false;
+
+      pollute("formSerializer", {
+        visitor: function () {
+          visitorInvoked = true;
+          this.append("injected", "yes");
+          return false;
+        },
+      });
+
+      try {
+        const headers = new AxiosHeaders();
+        headers.setContentType("application/x-www-form-urlencoded");
+
+        const result = defaults.transformRequest[0].call(
+          {},
+          { foo: "bar" },
+          headers
+        );
+
+        assert.strictEqual(visitorInvoked, false);
+        assert.strictEqual(result, "foo=bar");
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("should still honor an own formSerializer", function () {
+      const headers = new AxiosHeaders();
+      headers.setContentType("application/x-www-form-urlencoded");
+
+      const result = defaults.transformRequest[0].call(
+        { formSerializer: { dots: true } },
+        { a: { b: "c" } },
+        headers
+      );
+
+      assert.strictEqual(result, "a.b=c");
+    });
+
+    it("should ignore a polluted env.FormData for multipart payloads", function () {
+      let hijackConstructed = false;
+
+      function HijackFormData() {
+        hijackConstructed = true;
+      }
+      HijackFormData.prototype.append = function () {};
+
+      pollute("env", { FormData: HijackFormData });
+
+      try {
+        const headers = new AxiosHeaders();
+        headers.setContentType("multipart/form-data");
+
+        const result = defaults.transformRequest[0].call(
+          {},
+          { foo: "bar" },
+          headers
+        );
+
+        assert.strictEqual(hijackConstructed, false);
+        assert.strictEqual(result instanceof HijackFormData, false);
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe("defaults.transformResponse", function () {
+    it("should ignore a polluted transitional that disables JSON parsing", function () {
+      pollute("transitional", {
+        silentJSONParsing: true,
+        forcedJSONParsing: false,
+      });
+
+      try {
+        const result = defaults.transformResponse[0].call({}, '{"role":"user"}');
+
+        assert.deepStrictEqual(result, { role: "user" });
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("should ignore a polluted responseType", function () {
+      pollute("responseType", "text");
+
+      try {
+        const result = defaults.transformResponse[0].call({}, '{"role":"user"}');
+
+        assert.deepStrictEqual(result, { role: "user" });
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("should not attach a polluted response to JSON parse errors", function () {
+      const pollutedResponse = { status: 200, data: "attacker" };
+
+      pollute("response", pollutedResponse);
+
+      try {
+        assert.throws(
+          function () {
+            defaults.transformResponse[0].call(
+              {
+                responseType: "json",
+                transitional: {
+                  silentJSONParsing: false,
+                  forcedJSONParsing: true,
+                },
+              },
+              "{invalid json"
+            );
+          },
+          function (err) {
+            return (
+              err.code === "ERR_BAD_RESPONSE" &&
+              !Object.prototype.hasOwnProperty.call(err, "response")
+            );
+          }
+        );
+      } finally {
+        cleanup();
+      }
+    });
+  });
+
+  describe("http adapter", function () {
+    it("should not route requests through a polluted transport", async function () {
+      let hijackedAuth = null;
+      let server;
+
+      try {
+        server = await startServer(function (req, res) {
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ authorization: req.headers.authorization || null }));
+        });
+
+        pollute("transport", {
+          request: function (options, handleResponse) {
+            hijackedAuth = options.auth || "(none)";
+            return http.request(options, handleResponse);
+          },
+        });
+
+        const response = await axios.get(
+          "http://127.0.0.1:" + server.address().port + "/api/users",
+          {
+            auth: { username: "svc_account", password: "hunter2" },
+          }
+        );
+
+        assert.strictEqual(hijackedAuth, null);
+        assert.strictEqual(
+          response.data.authorization,
+          "Basic " + Buffer.from("svc_account:hunter2").toString("base64")
+        );
+      } finally {
+        cleanup();
+        await stopServer(server);
+      }
+    });
+
+    it("should not run polluted transformRequest/transformResponse functions", async function () {
+      let requestTransformInvoked = false;
+      let responseTransformInvoked = false;
+      let server;
+
+      try {
+        server = await startServer(function (req, res) {
+          let body = "";
+          req.on("data", function (chunk) {
+            body += chunk;
+          });
+          req.on("end", function () {
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ received: body }));
+          });
+        });
+
+        pollute("transformRequest", function () {
+          requestTransformInvoked = true;
+          return '{"tampered":true}';
+        });
+        pollute("transformResponse", function () {
+          responseTransformInvoked = true;
+          return { tampered: true };
+        });
+
+        const response = await axios.post(
+          "http://127.0.0.1:" + server.address().port + "/",
+          { role: "user" }
+        );
+
+        assert.strictEqual(requestTransformInvoked, false);
+        assert.strictEqual(responseTransformInvoked, false);
+        assert.deepStrictEqual(response.data, { received: '{"role":"user"}' });
+      } finally {
+        cleanup();
+        await stopServer(server);
+      }
+    });
+
+    it("should ignore a polluted env.Blob when decoding data: URIs", async function () {
+      let hijackConstructed = false;
+
+      function HijackBlob() {
+        hijackConstructed = true;
+      }
+
+      pollute("env", { Blob: HijackBlob });
+
+      try {
+        let response;
+
+        try {
+          response = await httpAdapter({
+            method: "get",
+            url: "data:text/plain;base64,SGVsbG8=",
+            headers: {},
+            responseType: "blob",
+            maxContentLength: -1,
+            maxBodyLength: -1,
+          });
+        } catch (err) {
+          // Runtimes without a global Blob reject with "Blob is not supported"
+          // once the polluted constructor is no longer picked up.
+          assert.ok(/Blob is not supported/.test(err.message), err.message);
+        }
+
+        assert.strictEqual(hijackConstructed, false);
+        if (response) {
+          assert.strictEqual(response.data instanceof HijackBlob, false);
+        }
       } finally {
         cleanup();
       }
